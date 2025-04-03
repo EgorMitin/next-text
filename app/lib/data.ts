@@ -1,218 +1,131 @@
-import postgres from 'postgres';
-import {
-  CustomerField,
-  CustomersTableType,
-  InvoiceForm,
-  InvoicesTable,
-  LatestInvoiceRaw,
-  Revenue,
-} from './definitions';
-import { formatCurrency } from './utils';
+import { DatabaseService } from '@/services/database/DatabaseService';
+import { AnnotatedWord } from '@/types/word';
+import { logger } from '@/utils/logger';
+import { unstable_noStore as noStore } from 'next/cache';
 
-const sql = postgres(process.env.POSTGRES_URL!, { ssl: 'require' });
+const ITEMS_PER_PAGE = 10;
+const dbService = DatabaseService.getInstance();
 
-export async function fetchRevenue() {
+export async function fetchRecentAnnotatedWords() {
+  noStore();
   try {
-    // Artificially delay a response for demo purposes.
-    // Don't do this in production :)
+    logger.info('Fetching recent annotated words');
 
-    // console.log('Fetching revenue data...');
-    // await new Promise((resolve) => setTimeout(resolve, 3000));
+    const words = await dbService.findRecentAnnotatedWords(5);
 
-    const data = await sql<Revenue[]>`SELECT * FROM revenue`;
-
-    // console.log('Data fetch completed after 3 seconds.');
-
-    return data;
+    return words;
   } catch (error) {
-    console.error('Database Error:', error);
-    throw new Error('Failed to fetch revenue data.');
+    logger.error('Error fetching recent annotated words:', error);
+    throw new Error('Failed to fetch recent annotated words.');
   }
 }
 
-export async function fetchLatestInvoices() {
+export async function fetchWordStats() {
+  noStore();
   try {
-    const data = await sql<LatestInvoiceRaw[]>`
-      SELECT invoices.amount, customers.name, customers.image_url, customers.email, invoices.id
-      FROM invoices
-      JOIN customers ON invoices.customer_id = customers.id
-      ORDER BY invoices.date DESC
-      LIMIT 5`;
+    logger.info('Fetching word statistics');
 
-    const latestInvoices = data.map((invoice) => ({
-      ...invoice,
-      amount: formatCurrency(invoice.amount),
-    }));
-    return latestInvoices;
-  } catch (error) {
-    console.error('Database Error:', error);
-    throw new Error('Failed to fetch the latest invoices.');
-  }
-}
+    const totalWordsPromise = dbService.countTotalWords();
+    const languageStatsPromise = dbService.countWordsByLanguage();
+    const mediaStatsPromise = dbService.countWordsByMediaAvailability();
 
-export async function fetchCardData() {
-  try {
-    // You can probably combine these into a single SQL query
-    // However, we are intentionally splitting them to demonstrate
-    // how to initialize multiple queries in parallel with JS.
-    const invoiceCountPromise = sql`SELECT COUNT(*) FROM invoices`;
-    const customerCountPromise = sql`SELECT COUNT(*) FROM customers`;
-    const invoiceStatusPromise = sql`SELECT
-         SUM(CASE WHEN status = 'paid' THEN amount ELSE 0 END) AS "paid",
-         SUM(CASE WHEN status = 'pending' THEN amount ELSE 0 END) AS "pending"
-         FROM invoices`;
-
-    const data = await Promise.all([
-      invoiceCountPromise,
-      customerCountPromise,
-      invoiceStatusPromise,
+    const [totalWords, languageStats, mediaStats] = await Promise.all([
+      totalWordsPromise,
+      languageStatsPromise,
+      mediaStatsPromise
     ]);
 
-    const numberOfInvoices = Number(data[0][0].count ?? '0');
-    const numberOfCustomers = Number(data[1][0].count ?? '0');
-    const totalPaidInvoices = formatCurrency(data[2][0].paid ?? '0');
-    const totalPendingInvoices = formatCurrency(data[2][0].pending ?? '0');
-
     return {
-      numberOfCustomers,
-      numberOfInvoices,
-      totalPaidInvoices,
-      totalPendingInvoices,
+      totalWords,
+      languageStats,
+      mediaStats
     };
   } catch (error) {
-    console.error('Database Error:', error);
-    throw new Error('Failed to fetch card data.');
+    logger.error('Error fetching word statistics:', error);
+    throw new Error('Failed to fetch word statistics.');
   }
 }
 
-const ITEMS_PER_PAGE = 6;
-export async function fetchFilteredInvoices(
+export async function fetchFilteredWords(
   query: string,
   currentPage: number,
+  language: string="de",
 ) {
-  const offset = (currentPage - 1) * ITEMS_PER_PAGE;
-
+  noStore();
   try {
-    const invoices = await sql<InvoicesTable[]>`
-      SELECT
-        invoices.id,
-        invoices.amount,
-        invoices.date,
-        invoices.status,
-        customers.name,
-        customers.email,
-        customers.image_url
-      FROM invoices
-      JOIN customers ON invoices.customer_id = customers.id
-      WHERE
-        customers.name ILIKE ${`%${query}%`} OR
-        customers.email ILIKE ${`%${query}%`} OR
-        invoices.amount::text ILIKE ${`%${query}%`} OR
-        invoices.date::text ILIKE ${`%${query}%`} OR
-        invoices.status ILIKE ${`%${query}%`}
-      ORDER BY invoices.date DESC
-      LIMIT ${ITEMS_PER_PAGE} OFFSET ${offset}
-    `;
+    logger.info(`Fetching filtered words: query=${query}, language=${language}, page=${currentPage}`);
 
-    return invoices;
+    const words = await dbService.findFilteredWords(
+      query,
+      language,
+      ITEMS_PER_PAGE,
+      (currentPage - 1) * ITEMS_PER_PAGE
+    );
+
+    return words;
   } catch (error) {
-    console.error('Database Error:', error);
-    throw new Error('Failed to fetch invoices.');
+    logger.error('Error fetching filtered words:', error);
+    throw new Error('Failed to fetch words.');
   }
 }
 
-export async function fetchInvoicesPages(query: string) {
+export async function fetchWordsPages(query: string, language: string="de") {
+  noStore();
   try {
-    const data = await sql`SELECT COUNT(*)
-    FROM invoices
-    JOIN customers ON invoices.customer_id = customers.id
-    WHERE
-      customers.name ILIKE ${`%${query}%`} OR
-      customers.email ILIKE ${`%${query}%`} OR
-      invoices.amount::text ILIKE ${`%${query}%`} OR
-      invoices.date::text ILIKE ${`%${query}%`} OR
-      invoices.status ILIKE ${`%${query}%`}
-  `;
+    logger.info(`Calculating total pages for words: query=${query}, language=${language}`);
 
-    const totalPages = Math.ceil(Number(data[0].count) / ITEMS_PER_PAGE);
+    const count = await dbService.countFilteredWords(query, language);
+    const totalPages = Math.ceil(count / ITEMS_PER_PAGE);
+
     return totalPages;
   } catch (error) {
-    console.error('Database Error:', error);
-    throw new Error('Failed to fetch total number of invoices.');
+    logger.error('Error calculating word pages:', error);
+    throw new Error('Failed to fetch total number of words.');
   }
 }
 
-export async function fetchInvoiceById(id: string) {
+export async function fetchWordById(id: string) {
+  noStore();
   try {
-    const data = await sql<InvoiceForm[]>`
-      SELECT
-        invoices.id,
-        invoices.customer_id,
-        invoices.amount,
-        invoices.status
-      FROM invoices
-      WHERE invoices.id = ${id};
-    `;
+    logger.info(`Fetching word by ID: ${id}`);
 
-    const invoice = data.map((invoice) => ({
-      ...invoice,
-      // Convert amount from cents to dollars
-      amount: invoice.amount / 100,
-    }));
+    const word = await dbService.findWordById(id);
 
-    return invoice[0];
+    if (!word) {
+      throw new Error(`Word with ID ${id} not found`);
+    }
+
+    return word;
   } catch (error) {
-    console.error('Database Error:', error);
-    throw new Error('Failed to fetch invoice.');
+    logger.error(`Error fetching word by ID ${id}:`, error);
+    throw new Error('Failed to fetch word.');
   }
 }
 
-export async function fetchCustomers() {
+export async function fetchLanguages() {
+  noStore();
   try {
-    const customers = await sql<CustomerField[]>`
-      SELECT
-        id,
-        name
-      FROM customers
-      ORDER BY name ASC
-    `;
+    logger.info('Fetching available languages');
 
-    return customers;
-  } catch (err) {
-    console.error('Database Error:', err);
-    throw new Error('Failed to fetch all customers.');
+    const languages = await dbService.findAllLanguages();
+
+    return languages;
+  } catch (error) {
+    logger.error('Error fetching languages:', error);
+    throw new Error('Failed to fetch languages.');
   }
 }
 
-export async function fetchFilteredCustomers(query: string) {
+export async function fetchFilteredWordsByType(wordType: string, language: string) {
+  noStore();
   try {
-    const data = await sql<CustomersTableType[]>`
-		SELECT
-		  customers.id,
-		  customers.name,
-		  customers.email,
-		  customers.image_url,
-		  COUNT(invoices.id) AS total_invoices,
-		  SUM(CASE WHEN invoices.status = 'pending' THEN invoices.amount ELSE 0 END) AS total_pending,
-		  SUM(CASE WHEN invoices.status = 'paid' THEN invoices.amount ELSE 0 END) AS total_paid
-		FROM customers
-		LEFT JOIN invoices ON customers.id = invoices.customer_id
-		WHERE
-		  customers.name ILIKE ${`%${query}%`} OR
-        customers.email ILIKE ${`%${query}%`}
-		GROUP BY customers.id, customers.name, customers.email, customers.image_url
-		ORDER BY customers.name ASC
-	  `;
+    logger.info(`Fetching words by type: type=${wordType}, language=${language}`);
 
-    const customers = data.map((customer) => ({
-      ...customer,
-      total_pending: formatCurrency(customer.total_pending),
-      total_paid: formatCurrency(customer.total_paid),
-    }));
+    const words = await dbService.findWordsByType(wordType, language);
 
-    return customers;
-  } catch (err) {
-    console.error('Database Error:', err);
-    throw new Error('Failed to fetch customer table.');
+    return words;
+  } catch (error) {
+    logger.error('Error fetching words by type:', error);
+    throw new Error('Failed to fetch words by type.');
   }
 }
